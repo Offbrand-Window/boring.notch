@@ -1,3 +1,6 @@
+> **Offbrand-Window fork — 2.8.2 “Vibing Deer”**
+> Download builds from [this fork’s releases](https://github.com/Offbrand-Window/boring.notch/releases). See [fork features, limitations, and signed update publishing](FORK_RELEASE.md). The original project and its authors are credited below.
+
 <h1 align="center">
   <br>
   <a href="http://theboring.name"><img src="https://framerusercontent.com/images/RFK4vs0kn8pRMuOO58JeyoemXA.png?scale-down-to=256" alt="Boring Notch" width="150"></a>

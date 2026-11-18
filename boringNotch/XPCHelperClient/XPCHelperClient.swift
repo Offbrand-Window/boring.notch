@@ -5,7 +5,7 @@ import AsyncXPCConnection
 final class XPCHelperClient: NSObject {
     nonisolated static let shared = XPCHelperClient()
     
-    private let serviceName = "theboringteam.boringnotch.BoringNotchXPCHelper"
+    private let serviceName = "local.arjun.boringnotch.custom.BoringNotchXPCHelper"
     
     private var remoteService: RemoteXPCService<BoringNotchXPCHelperProtocol>?
     private var connection: NSXPCConnection?
@@ -95,6 +95,41 @@ final class XPCHelperClient: NSObject {
         return monitoringTask != nil
     }
     
+    nonisolated func headphoneBannerProfileInstalled() async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.headphoneBannerProfileInstalled { continuation.resume(returning: $0) }
+            }
+        } catch { return false }
+    }
+
+    nonisolated func returnBluetoothAudio(address: String) async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.returnBluetoothAudio(address) { continuation.resume(returning: $0) }
+            }
+        } catch { return false }
+    }
+
+    nonisolated func smartRoutingEvents() async -> SmartRoutingMonitorReply? {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let data: Data = try await service.withContinuation { service, continuation in
+                service.smartRoutingEvents { continuation.resume(returning: $0) }
+            }
+            return try JSONDecoder().decode(SmartRoutingMonitorReply.self, from: data)
+        } catch { return nil }
+    }
+
+    nonisolated func stopSmartRoutingMonitor() {
+        Task {
+            let service = await MainActor.run { ensureRemoteService() }
+            try? await service.withService { $0.stopSmartRoutingMonitor() }
+        }
+    }
+
     // MARK: - Accessibility
     
     nonisolated func requestAccessibilityAuthorization() {

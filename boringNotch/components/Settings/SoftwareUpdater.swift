@@ -65,3 +65,12 @@ struct UpdaterSettingsView: View {
         }
     }
 }
+
+
+/// Pin update checks to this fork even if an earlier installation saved a
+/// different feed URL in user defaults.
+final class ForkUpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        "https://raw.githubusercontent.com/Offbrand-Window/boring.notch/main/updater/appcast.xml"
+    }
+}

@@ -19,10 +19,14 @@ struct DynamicNotchApp: App {
     @Environment(\.openWindow) var openWindow
 
     let updaterController: SPUStandardUpdaterController
+    private let updateDelegate: ForkUpdaterDelegate
 
     init() {
+        Defaults[.releaseName] = "Vibing Deer"
+        let delegate = ForkUpdaterDelegate()
+        updateDelegate = delegate
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            startingUpdater: true, updaterDelegate: delegate, userDriverDelegate: nil)
 
         // Initialize the settings window controller with the updater controller
         SettingsWindowController.shared.setUpdaterController(updaterController)
@@ -36,6 +40,7 @@ struct DynamicNotchApp: App {
                 }
             }
             .keyboardShortcut(KeyEquivalent(","), modifiers: .command)
+            Text("2.8.2 · Vibing Deer")
             CheckForUpdatesView(updater: updaterController.updater)
             Divider()
             Button("Restart Boring Notch") {
@@ -65,6 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenLockedObserver: Any?
     private var screenUnlockedObserver: Any?
     private var isScreenLocked: Bool = false
+    private var skyLightDisableTask: Task<Void, Never>?
     private var windowScreenDidChangeObserver: Any?
     private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector
 
@@ -85,12 +91,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MusicManager.shared.destroy()
         cleanupDragDetectors()
         cleanupWindows()
+        XPCHelperClient.shared.stopSmartRoutingMonitor()
         XPCHelperClient.shared.stopMonitoringAccessibilityAuthorization()
     }
 
     @MainActor
     func onScreenLocked(_ notification: Notification) {
         isScreenLocked = true
+        NotchActivityManager.shared.setLocked(true)
+        vm.close()
+        viewModels.values.forEach { $0.close() }
         if !Defaults[.showOnLockScreen] {
             cleanupWindows()
         } else {
@@ -101,6 +111,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func onScreenUnlocked(_ notification: Notification) {
         isScreenLocked = false
+        NotchActivityManager.shared.setLocked(false)
         if !Defaults[.showOnLockScreen] {
             adjustWindowPosition(changeAlpha: true)
         } else {
@@ -110,6 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @MainActor
     private func enableSkyLightOnAllWindows() {
+        skyLightDisableTask?.cancel()
         if Defaults[.showOnAllDisplays] {
             windows.values.forEach { window in
                 if let skyWindow = window as? BoringNotchSkyLightWindow {
@@ -126,8 +138,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func disableSkyLightOnAllWindows() {
         // Delay disabling SkyLight to avoid flicker during unlock transition
-        Task {
+        skyLightDisableTask?.cancel()
+        skyLightDisableTask = Task {
             try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, !self.isScreenLocked else { return }
             await MainActor.run {
                 if Defaults[.showOnAllDisplays] {
                     self.windows.values.forEach { window in
@@ -220,7 +234,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleDragEntersNotchRegion(onScreen screen: NSScreen) {
-        guard let uuid = screen.displayUUID else { return }
+        guard !isScreenLocked, let uuid = screen.displayUUID else { return }
         
         if Defaults[.showOnAllDisplays], let viewModel = viewModels[uuid] {
             viewModel.open()
@@ -280,6 +294,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        isScreenLocked = NotchActivityManager.shared.isLocked && !ProcessInfo.processInfo.arguments.contains("--preview-lock")
+        if ProcessInfo.processInfo.arguments.contains("--open-settings") {
+            DispatchQueue.main.async { SettingsWindowController.shared.showWindow() }
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -366,6 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         KeyboardShortcuts.onKeyDown(for: .toggleNotchOpen) { [weak self] in
+            guard !NotchActivityManager.shared.isLockPresentationActive else { return }
             Task { [weak self] in
                 guard let self = self else { return }
 

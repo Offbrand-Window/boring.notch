@@ -21,6 +21,10 @@ struct ContentView: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
     @ObservedObject var musicManager = MusicManager.shared
     @ObservedObject var batteryModel = BatteryStatusViewModel.shared
+    @ObservedObject var activity = NotchActivityManager.shared
+    @Default(.bluetoothLiveActivity) var bluetoothLiveActivity
+    @Default(.bluetoothActivityStyle) var bluetoothActivityStyle
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var brightnessManager = BrightnessManager.shared
     @ObservedObject var volumeManager = VolumeManager.shared
     @State private var hoverTask: Task<Void, Never>?
@@ -32,6 +36,7 @@ struct ContentView: View {
     @State private var haptics: Bool = false
 
     @Namespace var albumArtNamespace
+    @Namespace private var closedAccessoryNamespace
 
     @Default(.useMusicVisualizer) var useMusicVisualizer
 
@@ -61,6 +66,19 @@ struct ContentView: View {
     private var computedChinWidth: CGFloat {
         var chinWidth: CGFloat = vm.closedNotchSize.width
 
+        if activity.isLockPresentationActive {
+            return compactContentWidth + 2 * cornerRadiusInsets.closed.bottom
+        }
+        if activity.bluetoothEvent != nil && bluetoothLiveActivity && vm.notchState == .closed {
+            switch bluetoothActivityStyle {
+            case .inline:
+                return vm.closedNotchSize.width + 280
+            case .standard:
+                return normalClosedContentWidth + 2 * cornerRadiusInsets.closed.bottom
+            case .lowProfile:
+                return lowProfileContentWidth + 2 * cornerRadiusInsets.closed.bottom
+            }
+        }
         if coordinator.expandingView.type == .battery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.showPowerStatusNotifications]
         {
@@ -213,6 +231,24 @@ struct ContentView: View {
         .animation(.smooth, value: gestureProgress)
         .background(dragDetector)
         .preferredColorScheme(.dark)
+        .allowsHitTesting(!activity.isLockPresentationActive)
+        .onChange(of: activity.isLockPresentationActive) { _, locked in
+            if locked {
+                hoverTask?.cancel()
+                anyDropDebounceTask?.cancel()
+                isHovering = false
+                vm.close()
+            }
+        }
+        .onChange(of: activity.bluetoothEvent?.id) { _, id in
+            guard id != nil, bluetoothLiveActivity, !activity.isLockPresentationActive else { return }
+            hoverTask?.cancel()
+            isHovering = false
+            vm.close()
+        }
+        .animation(animationSpring, value: activity.bluetoothEvent?.id)
+        .animation(.easeInOut(duration: reduceMotion ? 0.12 : 0.24), value: activity.isLockPresentationActive)
+        .animation(animationSpring, value: bluetoothActivityStyle)
         .environmentObject(vm)
         .onChange(of: vm.anyDropZoneTargeting) { _, isTargeted in
             anyDropDebounceTask?.cancel()
@@ -246,7 +282,11 @@ struct ContentView: View {
     func NotchLayout() -> some View {
         VStack(alignment: .leading) {
             VStack(alignment: .leading) {
-                if coordinator.helloAnimationRunning {
+                if activity.isLockPresentationActive {
+                    lockedActivity
+                } else if let event = activity.bluetoothEvent, bluetoothLiveActivity, vm.notchState == .closed {
+                    bluetoothActivity(event)
+                } else if coordinator.helloAnimationRunning {
                     Spacer()
                     HelloAnimation(onFinish: {
                         vm.closeHello()
@@ -290,6 +330,7 @@ struct ContentView: View {
                       } else if (!coordinator.expandingView.show || coordinator.expandingView.type == .music) && vm.notchState == .closed && (musicManager.isPlaying || !musicManager.isPlayerIdle) && coordinator.musicLiveActivityEnabled && !vm.hideOnClosed {
                           MusicLiveActivity()
                               .frame(alignment: .center)
+                              .transition(.opacity)
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed  {
                           BoringFaceAnimation()
                        } else if vm.notchState == .open {
@@ -300,7 +341,7 @@ struct ContentView: View {
                            Rectangle().fill(.clear).frame(width: vm.closedNotchSize.width - 20, height: vm.effectiveClosedNotchHeight)
                        }
 
-                      if coordinator.sneakPeek.show {
+                      if coordinator.sneakPeek.show && !activity.isLockPresentationActive {
                           if (coordinator.sneakPeek.type != .music) && (coordinator.sneakPeek.type != .battery) && !Defaults[.inlineHUD] && vm.notchState == .closed {
                               SystemEventIndicatorModifier(
                                   eventType: $coordinator.sneakPeek.type,
@@ -342,7 +383,7 @@ struct ContentView: View {
                       .fixedSize()
               }
               .zIndex(2)
-            if vm.notchState == .open {
+            if vm.notchState == .open && !activity.isLockPresentationActive {
                 VStack {
                     switch coordinator.currentView {
                     case .home:
@@ -364,42 +405,192 @@ struct ContentView: View {
         .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText, .data], delegate: GeneralDropTargetDelegate(isTargeted: $vm.generalDropTargeting))
     }
 
+    // Shared with the ordinary mini-player: no lock-screen-specific scaling.
+    private var compactArtworkSize: CGFloat {
+        max(0, vm.effectiveClosedNotchHeight - 12)
+    }
+
+    private var compactContentWidth: CGFloat {
+        max(0, vm.closedNotchSize.width - cornerRadiusInsets.closed.top) + 2 * compactArtworkSize + 16
+    }
+
+    private var normalClosedContentWidth: CGFloat {
+        if (musicManager.isPlaying || !musicManager.isPlayerIdle) && coordinator.musicLiveActivityEnabled && !vm.hideOnClosed {
+            return compactContentWidth
+        }
+        return max(0, vm.closedNotchSize.width - 20)
+    }
+
+    private var lockScreenShowsMusic: Bool {
+        musicManager.isPlaying && !ProcessInfo.processInfo.arguments.contains("--preview-idle-face")
+    }
+
+    private var lockedActivity: some View {
+        HStack(spacing: 8) {
+            Group {
+                if lockScreenShowsMusic {
+                    Image(nsImage: musicManager.albumArt)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: compactArtworkSize, height: compactArtworkSize)
+                        .clipShape(RoundedRectangle(cornerRadius: MusicPlayerImageSizes.cornerRadiusInset.closed))
+                        .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
+                        .accessibilityLabel("Now playing: \(musicManager.songTitle), by \(musicManager.artistName)")
+                        .transition(.opacity)
+                } else {
+                    MinimalFaceFeatures()
+                        .scaleEffect(min(compactArtworkSize / 30, compactArtworkSize / 32))
+                        .frame(width: compactArtworkSize, height: compactArtworkSize)
+                        .accessibilityLabel("Mac face")
+                        .transition(.opacity)
+                }
+            }
+            .frame(width: compactArtworkSize, height: compactArtworkSize)
+
+            Color.clear.frame(width: max(0, vm.closedNotchSize.width - cornerRadiusInsets.closed.top))
+
+            Image(systemName: activity.isUnlocking ? "lock.open.fill" : "lock.fill")
+                .font(.system(size: compactArtworkSize * 0.72, weight: .semibold))
+                .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
+                .animation(.easeInOut(duration: 0.16), value: activity.isUnlocking)
+                .accessibilityLabel(activity.isUnlocking ? "Screen unlocked" : "Screen locked")
+                .frame(width: compactArtworkSize, height: compactArtworkSize)
+                .matchedGeometryEffect(id: "closedTrailingAccessory", in: closedAccessoryNamespace)
+        }
+        .foregroundStyle(.white)
+        .frame(height: vm.effectiveClosedNotchHeight)
+        .animation(.easeInOut(duration: 0.16), value: lockScreenShowsMusic)
+        .transition(.opacity)
+    }
+
+    @ViewBuilder
+    private func bluetoothActivity(_ event: NotchActivityManager.BluetoothEvent) -> some View {
+        if bluetoothActivityStyle == .lowProfile {
+            lowProfileBluetoothActivity(event)
+        } else if bluetoothActivityStyle == .inline {
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: event.icon)
+                    Text(event.name).lineLimit(1).truncationMode(.tail)
+                }
+                .frame(width: 145, alignment: .leading)
+                Color.clear.frame(width: max(0, vm.closedNotchSize.width - 20))
+                bluetoothStatus(event)
+                    .frame(width: 135, alignment: .trailing)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(height: max(24, vm.effectiveClosedNotchHeight))
+            .accessibilityElement(children: .contain)
+        } else {
+            VStack(spacing: 8) {
+                // Preserve the mini-player above the expanded activity, as the
+                // existing volume HUD does, while keeping the camera clear.
+                if (musicManager.isPlaying || !musicManager.isPlayerIdle) && coordinator.musicLiveActivityEnabled && !vm.hideOnClosed {
+                    MusicLiveActivity()
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Color.clear.frame(height: max(24, vm.effectiveClosedNotchHeight))
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 7) {
+                        Image(systemName: event.icon)
+                            .frame(width: 18)
+                        Text(event.name)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    bluetoothStatus(event)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4)
+                .padding(.bottom, 10)
+            }
+            .frame(width: normalClosedContentWidth)
+            .foregroundStyle(.white)
+            .accessibilityElement(children: .contain)
+        }
+    }
+
+    private var lowProfileContentWidth: CGFloat { compactContentWidth }
+
+    private func lowProfileBluetoothActivity(_ event: NotchActivityManager.BluetoothEvent) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: event.icon)
+                .font(.system(size: compactArtworkSize * 0.9))
+                .frame(width: compactArtworkSize, height: compactArtworkSize)
+                .accessibilityLabel(event.name)
+            Color.clear.frame(width: max(0, vm.closedNotchSize.width - cornerRadiusInsets.closed.top))
+            Group {
+                if activity.isReturningAudio {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                } else if event.audioDeviceID != nil || event.bluetoothAddress != nil {
+                    Button {
+                        activity.returnAudioToMac(event)
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Return audio to this Mac")
+                    .accessibilityLabel("Return audio to this Mac")
+                } else {
+                    Image(systemName: event.connected ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(event.connected ? .green : .white)
+                }
+            }
+            .font(.system(size: compactArtworkSize * 0.72, weight: .semibold))
+            .frame(width: compactArtworkSize, height: compactArtworkSize)
+            .matchedGeometryEffect(id: "closedTrailingAccessory", in: closedAccessoryNamespace)
+        }
+        .foregroundStyle(.white)
+        .frame(height: vm.effectiveClosedNotchHeight)
+        .help("\(event.name): \(event.status ?? (event.connected ? "Connected" : "Disconnected"))")
+        .accessibilityElement(children: .contain)
+    }
+
+    private func bluetoothStatus(_ event: NotchActivityManager.BluetoothEvent) -> some View {
+        HStack(spacing: 6) {
+            Label(event.status ?? (event.connected ? "Connected" : "Disconnected"),
+                  systemImage: event.connected ? "checkmark.circle.fill" : "minus.circle.fill")
+                .foregroundStyle(event.connected ? .green : .white)
+            if event.audioDeviceID != nil || event.bluetoothAddress != nil {
+                Button {
+                    activity.returnAudioToMac(event)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .disabled(activity.isReturningAudio)
+                .help("Return audio to this Mac")
+                .accessibilityLabel("Return audio to this Mac")
+            }
+        }
+    }
+
     @ViewBuilder
     func BoringFaceAnimation() -> some View {
-        HStack {
-            HStack {
-                Rectangle()
-                    .fill(.clear)
-                    .frame(
-                        width: max(0, vm.effectiveClosedNotchHeight - 12),
-                        height: max(0, vm.effectiveClosedNotchHeight - 12)
-                    )
-                Rectangle()
-                    .fill(.black)
-                    .frame(width: vm.closedNotchSize.width - 20)
-                MinimalFaceFeatures()
-            }
-        }.frame(
-            height: vm.effectiveClosedNotchHeight,
-            alignment: .center
-        )
+        HStack(spacing: 8) {
+            Color.clear.frame(width: compactArtworkSize, height: compactArtworkSize)
+            Color.clear.frame(width: max(0, vm.closedNotchSize.width - cornerRadiusInsets.closed.top))
+            MinimalFaceFeatures()
+                .scaleEffect(min(compactArtworkSize / 30, compactArtworkSize / 32))
+                .frame(width: compactArtworkSize, height: compactArtworkSize)
+                .matchedGeometryEffect(id: "closedTrailingAccessory", in: closedAccessoryNamespace)
+        }
+        .frame(height: vm.effectiveClosedNotchHeight)
     }
 
     @ViewBuilder
     func MusicLiveActivity() -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(nsImage: musicManager.albumArt)
                 .resizable()
-                .clipped()
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: MusicPlayerImageSizes.cornerRadiusInset.closed)
-                )
+                .scaledToFit()
+                .frame(width: compactArtworkSize, height: compactArtworkSize)
+                .clipShape(RoundedRectangle(cornerRadius: MusicPlayerImageSizes.cornerRadiusInset.closed))
                 .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
-                .frame(
-                    width: max(0, vm.effectiveClosedNotchHeight - 12),
-                    height: max(0, vm.effectiveClosedNotchHeight - 12)
-                )
 
             Rectangle()
                 .fill(.black)
@@ -479,6 +670,7 @@ struct ContentView: View {
                 ),
                 alignment: .center
             )
+            .matchedGeometryEffect(id: "closedTrailingAccessory", in: closedAccessoryNamespace)
         }
         .frame(
             height: vm.effectiveClosedNotchHeight,
@@ -503,6 +695,7 @@ struct ContentView: View {
     }
 
     private func doOpen() {
+        guard !activity.isLockPresentationActive else { return }
         withAnimation(animationSpring) {
             vm.open()
         }
@@ -511,7 +704,9 @@ struct ContentView: View {
     // MARK: - Hover Management
 
     private func handleHover(_ hovering: Bool) {
+        guard !activity.isLockPresentationActive else { return }
         if coordinator.firstLaunch { return }
+        if activity.bluetoothEvent != nil && bluetoothLiveActivity { return }
         hoverTask?.cancel()
         
         if hovering {

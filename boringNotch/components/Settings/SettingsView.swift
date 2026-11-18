@@ -349,6 +349,7 @@ struct GeneralSettings: View {
 }
 
 struct Charge: View {
+
     var body: some View {
         Form {
             Section {
@@ -463,6 +464,9 @@ struct Charge: View {
 //}
 
 struct HUD: View {
+    @ObservedObject private var activity = NotchActivityManager.shared
+    @ObservedObject private var headphoneProfile = HeadphoneBannerProfileManager.shared
+    @Default(.bluetoothActivityStyle) private var bluetoothActivityStyle
     @EnvironmentObject var vm: BoringViewModel
     @Default(.inlineHUD) var inlineHUD
     @Default(.enableGradient) var enableGradient
@@ -571,10 +575,49 @@ struct HUD: View {
                 Text("Closed Notch")
             }
             .disabled(!Defaults[.hudReplacement])
+            Section {
+                Defaults.Toggle(key: .bluetoothLiveActivity) {
+                    Text("Bluetooth connect / disconnect alerts")
+                }
+                Picker("Bluetooth activity style", selection: $bluetoothActivityStyle) {
+                    ForEach(BluetoothActivityStyle.allCases) { style in
+                        Text(style.rawValue).tag(style)
+                    }
+                }
+                .disabled(!Defaults[.bluetoothLiveActivity])
+                Text("Default expands downward. Inline shows the device and status beside the camera. Low Profile temporarily replaces media artwork with the device icon on the left and status on the right.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Toggle("Override system headphone banners", isOn: Binding(
+                    get: { headphoneProfile.isInstalled || headphoneProfile.awaitingApproval },
+                    set: { headphoneProfile.setOverride($0) }
+                ))
+                .disabled(headphoneProfile.isChecking)
+                if headphoneProfile.awaitingApproval {
+                    Text("Finish installing the notification profile in System Settings. macOS requires your approval.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("Review profile installation…") { openHeadphoneProfileSettings() }
+                } else if headphoneProfile.isInstalled {
+                    Text("The notification profile is installed. Turning this off opens Device Management so you can remove it and restore Apple's banners.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    Text("Turning this on prepares the profile and opens macOS installation approval. It hides Apple's headphone banners system-wide until removed.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let error = activity.smartRoutingMonitorError {
+                    Text(error).font(.footnote).foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Bluetooth")
+            }
         }
         .accentColor(.effectiveAccent)
         .navigationTitle("HUDs")
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            headphoneProfile.refresh()
+        }
         .task {
+            headphoneProfile.refresh()
             accessibilityAuthorized = await XPCHelperClient.shared.isAccessibilityAuthorized()
         }
         .onAppear {
@@ -870,7 +913,7 @@ struct About: View {
                 HStack(spacing: 30) {
                     Spacer(minLength: 0)
                     Button {
-                        if let url = URL(string: "https://github.com/TheBoredTeam/boring.notch") {
+                        if let url = URL(string: "https://github.com/Offbrand-Window/boring.notch") {
                             NSWorkspace.shared.open(url)
                         }
                     } label: {
@@ -1622,6 +1665,9 @@ struct Advanced: View {
                 Defaults.Toggle(key: .showOnLockScreen) {
                     Text("Show notch on lock screen")
                 }
+                Text("Shows the Mac face or playing album artwork on the left, with a lock on the right. The lock opens briefly when you unlock your Mac.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Defaults.Toggle(key: .hideFromScreenRecording) {
                     Text("Hide from screen recording")
                 }
